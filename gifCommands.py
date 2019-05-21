@@ -12,6 +12,7 @@ import strawpoll
 import asyncio
 import aiohttp
 import datetime
+import logging
 
 class Gif:
 
@@ -19,6 +20,7 @@ class Gif:
         self.bot = bot
         self.gifsConn = sqlite3.connect('db/gifs.db')
         self.gifsCur = self.gifsConn.cursor()
+        self.logger = logging.getLogger('bot')
 
     @commands.command(pass_context=True, aliases=["addGif", "addgyf", "addGyf"])
     async def addgif(self, ctx, url, game : str = "", comment : str = "", id : int = None):
@@ -26,7 +28,10 @@ class Gif:
         if url == None:
             await self.bot.say('```!addGif "<url>" "<game>" "<comment>"```')
         else:
-            self.gifsCur.execute("""INSERT INTO gifs (url, game, comment, addedBy, addedOn) VALUES ('%s', '%s', '%s', '%s', current_timestamp)""" % (url, game, comment, ctx.message.author))
+            self.logger.debug(ctx.message.author)
+            self.logger.debug(ctx.message.author.name)
+            self.logger.debug(ctx.message.author.id)
+            self.gifsCur.execute("""INSERT INTO gifs (url, game, comment, addedBy, addedOn) VALUES (?, ?, ?, ?, current_timestamp)""", (url, game, comment, ctx.message.author.id))
             lastid = self.gifsCur.lastrowid
             if id != None:
                 self.gifsCur.execute("""Select ROWID from gifs where ROWID = %s""" % (id))
@@ -38,10 +43,12 @@ class Gif:
                     return
             self.gifsConn.commit()
             # get the inserted gif and format it
-            outMessage = self.formatGifWithId(lastid)
+            outMessage = await self.formatGifWithId(lastid)
             try:
                 await self.bot.delete_message(ctx.message)
                 gifMsg = await self.bot.say(outMessage)
+                # default "upvote"
+                await self.bot.add_reaction(gifMsg, '👍')
                 # after sending the message update the entry to save the message id and the channel id
                 self.gifsCur.execute("""UPDATE gifs SET messageId = '%s', channelId = '%s' WHERE ROWID = %s""" % (gifMsg.id, gifMsg.channel.id, lastid))
                 self.gifsConn.commit()
@@ -51,13 +58,13 @@ class Gif:
                 await asyncio.sleep(6)
                 await self.bot.delete_message(message)
 
-    def formatGifWithId(self, gifid : int):
+    async def formatGifWithId(self, gifid : int):
         self.gifsCur.execute("""SELECT url, game, comment, addedBy, ROWID from gifs
                                 WHERE ROWID = %s""" % (gifid))
         row = self.gifsCur.fetchone()
-        return self.formatGif(row[0], row[1], row[2], row[3], row[4])
+        return await self.formatGif(row[0], row[1], row[2], row[3], row[4])
         
-    def formatGif(self, url, game, comment, addedBy, gifid):
+    async def formatGif(self, url, game, comment, addedBy, gifid):
         outStr = '```ml\n'
         if(comment != ""):
             outStr += '#%d: "%s"\n' % (gifid, comment)
@@ -67,9 +74,10 @@ class Gif:
         if(game != ""):
             outStr += "Spiel: " + game + "\n" 
         if(addedBy != ""):
+            user = await self.bot.get_user_info(addedBy)
             title = ['Dr. ', 'Meister ', 'Sir ', 'Mr. ', 'Lady ', 'Senor ', 'Der ', 'Das ', 'Die ', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']
             # addedBy contains discord userid like Pacman#1234
-            outStr += "Von " + random.choice(title) + addedBy.split("#")[0]
+            outStr += "Von " + random.choice(title) + user.name
         outStr += '```'
         outStr += url
         
@@ -85,9 +93,10 @@ class Gif:
             gifsCur2.execute("""Select url, comment, addedBy from gifs WHERE ROWID = %s """ % comboId)
             comboGif = gifsCur2.fetchone()
             if comboGif != None:
+                user = await self.bot.get_user_info(comboGif[2])
                 outStr += '\n```ml\n'
                 outStr += 'Das ist ein Combo Gif!\n'
-                outStr += 'Von: %s\n' % comboGif[2].split("#")[0]
+                outStr += 'Von: %s\n' % user.name
                 outStr += '#%d: "%s"' % (comboId, comboGif[1])
                 outStr += '```'
                 outStr += comboGif[0]
@@ -100,7 +109,6 @@ class Gif:
         Ist der Suchbegriff eine Zahl, wird das Gif mit der ID dieser Zahl ausgegeben.
         Wird kein Suchbegriff angegeben, wird ein zufälliges Gif angezeigt."""
         # Search for addedBy, game and comment
-        
         try:
             # id suche
             id = int(search)
@@ -118,7 +126,7 @@ class Gif:
         row = self.gifsCur.fetchone()
         
         if(row != None):
-            outStr = self.formatGif(row[0], row[1], row[2], row[3], row[4])
+            outStr = await self.formatGif(row[0], row[1], row[2], row[3], row[4])
             
             msg = await self.bot.say(outStr)
             if(row[5] != None and row[6] != None):
@@ -140,7 +148,8 @@ class Gif:
                             from gifs
                             group by addedBy
                             order by 2 desc"""):
-            s += "| {:<30.29}| {:<8}|\n".format(row[0].split("#")[0], row[1])
+            user = await self.bot.get_user_info(row[0])
+            s += "| {:<30.29}| {:<8}|\n".format(user.name, row[1])
         s += '```\n'
         s += '```ml\n'
         s += "| {:<30.29}| {:8s}|\n".format("Spiel","Anzahl")
@@ -170,44 +179,49 @@ class Gif:
         self.gifsCur.execute("""INSERT INTO comboGifs (id1, id2) VALUES (%d, %d)""" % (id1, id2))
         self.gifsConn.commit()
         await self.bot.say("Gifs #%s und #%s wurden zu einem ComboGif vereint :yin_yang: " % (id1, id2))
-        
+
+
     @commands.command(aliases=["listgifs", "listgif", "searchgifs"])
     async def searchgif(self, searchterm : str = ""):
-        """Zeigt ein Gif aus der Datenbank an"""
-        # Search for gifs and show a list
-        foundgif = False
-        initStr = '```ml\n'
-        initStr += "Folgende Gifs wurden gefunden:\n"
-        initStr += "| {:6}| {:<15s}| {:<45s}| {:<10s}\n".format("ID","Spieler","Name", "Spiel")
-        initStr += ('-' * 84)
-        initStr += "\n"
-        outStr = initStr
-        outStr = '```ml\n'
-        outStr += "Folgende Gifs wurden gefunden:\n"
-        outStr += "| {:6}| {:<15s}| {:<45s}| {:<10s}\n".format("ID","Spieler","Name", "Spiel")
-        outStr += ('-' * 84)
-        outStr += "\n"
-        counter = 0
-        for gif in self.gifsCur.execute("""Select game, comment, addedBy, ROWID from gifs
-                                    where """ #LOWER(addedBy) like '%""" + searchterm.lower() + """%' OR 
-                                        """LOWER(game) like '%""" + searchterm.lower() + """%' OR
-                                        LOWER(comment) like '%""" + searchterm.lower() + """%'"""):
-            outStr += "| {:6}| {:<15.16}| {:<45.44}| {:<10.10s}\n".format("#"+str(gif[3]), str(gif[2]).split("#")[0], str(gif[1]), str(gif[0]))
-            foundgif = True
-            counter += 1
-            if(counter % 20 == 0):
-                outStr += '```'
-                await self.bot.whisper(outStr)
-                outStr = initStr
-        outStr += '```'
-        if(foundgif):
-            if(counter <= 7):
-                await self.bot.say(outStr)
-            else:
-                await self.bot.reply("Resultate übermittelt :envelope_with_arrow: ")
-                await self.bot.whisper(outStr)
-        else:
-            await self.bot.say("Kein Gif zu '" + searchterm + "' gefunden :sob:")
+        await self.bot.say("Die Gif Suche findest du hier: http://allstar-bot.com/gifsearch/ :robot:")
+         
+    #@commands.command(aliases=["listgifs", "listgif", "searchgifs"])
+    #async def searchgif(self, searchterm : str = ""):
+    #    """Zeigt ein Gif aus der Datenbank an"""
+    #    # Search for gifs and show a list
+    #    foundgif = False
+    #    initStr = '```ml\n'
+    #    initStr += "Folgende Gifs wurden gefunden:\n"
+    #    initStr += "| {:6}| {:<15s}| {:<45s}| {:<10s}\n".format("ID","Spieler","Name", "Spiel")
+    #    initStr += ('-' * 84)
+    #    initStr += "\n"
+    #    outStr = initStr
+    #    outStr = '```ml\n'
+    #    outStr += "Folgende Gifs wurden gefunden:\n"
+    #    outStr += "| {:6}| {:<15s}| {:<45s}| {:<10s}\n".format("ID","Spieler","Name", "Spiel")
+    #    outStr += ('-' * 84)
+    #    outStr += "\n"
+    #    counter = 0
+    #    for gif in self.gifsCur.execute("""Select game, comment, addedBy, ROWID from gifs
+    #                                where """ #LOWER(addedBy) like '%""" + searchterm.lower() + """%' OR 
+    #                                    """LOWER(game) like '%""" + searchterm.lower() + """%' OR
+    #                                    LOWER(comment) like '%""" + searchterm.lower() + """%'"""):
+    #        outStr += "| {:6}| {:<15.16}| {:<45.44}| {:<10.10s}\n".format("#"+str(gif[3]), str(gif[2]).split("#")[0], str(gif[1]), str(gif[0]))
+    #        foundgif = True
+    #        counter += 1
+    #        if(counter % 20 == 0):
+    #            outStr += '```'
+    #            await self.bot.whisper(outStr)
+    #            outStr = initStr
+    #    outStr += '```'
+    #    if(foundgif):
+    #        if(counter <= 7):
+    #            await self.bot.say(outStr)
+    #        else:
+    #            await self.bot.reply("Resultate übermittelt :envelope_with_arrow: ")
+    #            await self.bot.whisper(outStr)
+    #    else:
+    #        await self.bot.say("Kein Gif zu '" + searchterm + "' gefunden :sob:")
         
     @commands.command(pass_context=True)
     async def deletegif(self, ctx, id):
@@ -217,14 +231,14 @@ class Gif:
         row = self.gifsCur.fetchone()
         
         if(row != None):
-            if(str(ctx.message.author) == str(row[0])):
+            if(str(ctx.message.author.id) == str(row[0])):
                 # delete original message if possible
                 if(row[2] != None and row[3] != None):
-                    print("deleting message")
+                    self.logger.info("deleting message - " + str(row[0]) + ", " + str(row[2]) + ", " + str(row[3]))
                     channel = discord.utils.get(self.bot.get_all_channels(), id=row[3])
                     origMsg = await self.bot.get_message(channel, row[2])
                     await self.bot.delete_message(origMsg)
-                    print("deleted message")
+                    self.logger.debug("deleted message")
             
                 # TODO: combo gifs löschen
                 self.gifsCur.execute("""Delete from gifs
@@ -247,7 +261,7 @@ class Gif:
             try:
                 await self.bot.add_reaction(msg, reaction.emoji)
             except:
-                print("unknown reaction: " + str(reaction.emoji))
+                self.logger.error("unknown reaction: " + str(reaction.emoji))
 
 
     async def gifOfTheMonth(self):
@@ -268,7 +282,11 @@ class Gif:
                         """where date(addedOn) >  date(date('now', '-2 day'), '-1 month')"""):
             if(gif[4] != None and gif[5] != None):
                 gifChannel = discord.utils.get(self.bot.get_all_channels(), id=gif[5])
-                cache_msg = await self.bot.get_message(gifChannel, gif[4])
+                try:
+                    cache_msg = await self.bot.get_message(gifChannel, gif[4])
+                except:
+                    self.logger.error("can't read gif id " + str(gif[5]) + ".")
+                    continue
                 reactionCount = 0
                 for reaction in cache_msg.reactions:
                     if(reaction.emoji == '👍'):
@@ -278,7 +296,7 @@ class Gif:
                         
                         if(reaction.count == mostVotes):
                             gifsOfTheWeek.append(gif)
-                    #print("message: " + str(cache_msg) + " - #reactions: " + str(len(cache_msg.reactions)) + " - reactions: ") 
+                    #self.logger.debug("message: " + str(cache_msg) + " - #reactions: " + str(len(cache_msg.reactions)) + " - reactions: ") 
                     reactionCount += reaction.count
                 if(reactionCount > mostReactions):
                     mostReactionsOTM = []
@@ -323,12 +341,12 @@ class Gif:
 
                     # Gif of the Month (most upvotes)
                     await self.bot.send_message(channel, "Das Gif des Monats mit "+ str(mostVotes) +" 👍 ist Gif #"+str(gifOfTheWeek[6]))
-                    gifMsg = self.formatGifWithId(gifOfTheWeek[6])
+                    gifMsg = await self.formatGifWithId(gifOfTheWeek[6])
                     gotmMsg = await self.bot.send_message(channel, gifMsg)
                     await self.addReactions(gotmMsg, gifOfTheWeek[4], gifOfTheWeek[5])
                     mostReactionsWinner=mostReactionsOTM[0]
                     # Most Reactions
                     await self.bot.send_message(channel, "Das Gif mit den meisten Reaktionen des Monats ist Gif #"+str(mostReactionsWinner[6]) + " mit " + str(mostReactions) + " Reaktionen!")
-                    gifMsg = self.formatGifWithId(mostReactionsWinner[6])
+                    gifMsg = await self.formatGifWithId(mostReactionsWinner[6])
                     mostReactionsMsg = await self.bot.send_message(channel, gifMsg)
                     await self.addReactions(mostReactionsMsg, mostReactionsWinner[4], mostReactionsWinner[5])
